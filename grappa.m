@@ -58,70 +58,76 @@ kspace_grappa(:,ACS_lines,:) = kspace(:,ACS_lines,:);
 Nx_patch = 3; Ny_patch = 3; % 3x3 patch/kernel
 x_points = 1:(Nx - (Nx_patch - 1));
 y_points = ACS_lines(1):(ACS_lines(end) - (Ny_patch - 1));
-Npatches = length(x_points)*length(y_points)*Ncoils; % 34848
+Npatches = length(x_points)*length(y_points); % 4356
 Nsource_per_patch = Nx_patch*(Ny_patch - 1)*Ncoils; % 48
-S = zeros(Nsource_per_patch,Npatches); % source pixels
-T = zeros(1,Npatches); % target pixels
+S_train = zeros(Nsource_per_patch,Npatches); % source pixels
+T_train = zeros(1,Npatches); % target pixels
 
-% Collect source and target voxels
-n_patch = 1; % keep track of which patch we're on
+% Collect source and target voxels, then compute weights by pinv
+weights = zeros(Ncoils,Nsource_per_patch);
 for coil = 1:Ncoils
+    n_patch = 1; % keep track of which patch we're on
     for ny = y_points
         for nx = x_points
             voxels_temp = kspace_grappa(nx:nx+2,ny:ny+2,:);
             source_voxels_temp = voxels_temp(:,[1 3],:);
-            S(:,n_patch) = source_voxels_temp(:);
-            T(n_patch) = voxels_temp(2,2,coil);
+            S_train(:,n_patch) = source_voxels_temp(:); % vectorize
+            T_train(n_patch) = voxels_temp(2,2,coil);
 
             n_patch = n_patch + 1;
         end
     end
+    % Invert S to find W according to T = W*S <=> T*pinv(S) = W*S*pinv(S) = W
+    % T = target_voxels
+    % W = weights
+    % S = source voxels
+    W = T_train*pinv(S_train);
+    weights(coil,:) = W;
+
+    % Check residual
+    residual = T_train - W*S_train;
+    mean_percent_residual = mean(abs(residual)./abs(T_train)) * 100;
 end
-
-% Invert S to find W according to T = W*S <=> T*pinv(S) = W*S*pinv(S) = W
-% T = target_voxels
-% W = weights
-% S = source voxels
-W = T*pinv(S);
-
-% Check residual
-residual = T - W*S;
-mean_percent_residual = mean(abs(residual)./abs(T)) * 100
 
 %% Construct source matric from the undersampled image
 % Now use all of ky
 y_points = 1:2:(Ny - (Ny_patch - 1));
-Npatches = length(x_points)*length(y_points)*Ncoils; % 156024
+Npatches = length(x_points)*length(y_points); % 19503
 Nsource_per_patch = Nx_patch*(Ny_patch - 1)*Ncoils; % 48
-S = zeros(Nsource_per_patch,Npatches); % source pixels
+S_test = zeros(Nsource_per_patch,Npatches); % source pixels
 
 % Collect source and target voxels
-n_patch = 1; % keep track of which patch we're on
+kspace_recon = zeros(size(kspace));
 for coil = 1:Ncoils
+    n_patch = 1; % keep track of which patch we're on
     for ny = y_points
         for nx = x_points
             voxels_temp = kspace_grappa(nx:nx+2,ny:ny+2,:);
             source_voxels_temp = voxels_temp(:,[1 3],:);
-            S(:,n_patch) = source_voxels_temp(:); % vectorize
+            S_test(:,n_patch) = source_voxels_temp(:); % vectorize
 
             n_patch = n_patch + 1;
         end
     end
+    % Compute T
+    T_test = weights(coil,:)*S_test;
+
+    % reshape vector into matrix
+    T_test = reshape(T_test, [length(x_points), length(y_points)]);
+
+    % refill kspace
+    kspace_recon(x_points + 1,y_points + 1,coil) = T_test; % x,y locations offset by 1
 end
 
-% Compute T
-T = W*S;
-
-% reshape vector into matrix
-T = reshape(T, [length(x_points), length(y_points), Ncoils]);
-
-% refill kspace
-kspace_recon = zeros(size(kspace));
-kspace_recon(x_points + 1,y_points + 1,:) = T;
-
-% refill acquired lines
+% Overwrite with acquired data
 mask = kspace_grappa ~= 0;
 kspace_recon(mask) = kspace_grappa(mask);
+
+%% Compute MSE before and after recon
+diff_grappa = kspace - kspace_grappa;
+MSE_grappa = mean(abs(diff_grappa),'all')
+diff_recon = kspace - kspace_recon;
+MSE_recon = mean(abs(diff_recon),'all')
 
 %% Display stuff
 close all;
@@ -136,22 +142,22 @@ im('db40','row',3,'col',3,kspace_recon);
 title('Afer GRAPPA recon');
 
 % Before and after GRAPPA, images
-imgs_grappa = ifftshift(ifft2(kspace_grappa));
-img_grappa = sqrt(sum(imgs_grappa.^2, 3));
-
-imgs_recon = ifftshift(ifft2(kspace_recon));
-img_recon = sqrt(sum(imgs_recon.^2, 3));
-
-imgs_truth = ifftshift(ifft2(kspace));
-img_truth = sqrt(sum(imgs_truth.^2, 3));
+imgs_grappa = ifftshift(ifft2(fftshift(kspace_grappa)));
+img_grappa = sum(imgs_grappa.*conj(smaps), 3);
+imgs_recon = ifftshift(ifft2(fftshift(kspace_recon)));
+img_recon = sum(imgs_recon.*conj(smaps), 3);
+imgs_truth = ifftshift(ifft2(fftshift(kspace)));
+img_truth = sum(imgs_truth.*conj(smaps), 3);
 
 figure;
 subplot(231); im(abs(img_grappa)); title('Before GRAPPA recon');
 subplot(232); im(abs(img_recon)); title('Afer GRAPPA recon');
 subplot(233); im(abs(img_truth)); title('Ground Truth');
-subplot(234); im(abs(img_grappa - img_truth)); %title('Undersampled - Truth');
-subplot(235); im(abs(img_recon - img_truth)); %title('Recon - Truth');
-subplot(236); im(abs(img_grappa - img_recon)); %title('Undersampled - Recon');
+
+[min,max] = bounds(abs(img_grappa) - abs(img_truth),'all');
+subplot(234); im(abs(img_grappa) - abs(img_truth),[min max]); %title('Undersampled - Truth');
+subplot(235); im(abs(img_recon) - abs(img_truth),[min max]); %title('Recon - Truth');
+subplot(236); im(abs(img_grappa) - abs(img_recon),[min max]); %title('Undersampled - Recon');
 
 %% Smaps
 figure;
